@@ -18,13 +18,14 @@ jobs:
     timeout-minutes: 60
 
     steps:
-      # ── 1. Checkout repo ─────────────────────────────────────────────────────
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          lfs: false
+          lfs: true
 
-      # ── 2. Find ISO ──────────────────────────────────────────────────────────
+      - name: Pull LFS files
+        run: git lfs pull
+
       - name: Find ISO file
         id: find_iso
         run: |
@@ -39,10 +40,17 @@ jobs:
             exit 1
           fi
 
+          MAGIC=$(file "$ISO")
+          echo "File type: $MAGIC"
+          if echo "$MAGIC" | grep -q "ASCII text"; then
+            echo "❌ ISO is an LFS pointer, not the real file!"
+            cat "$ISO"
+            exit 1
+          fi
+
           echo "iso=$ISO" >> "$GITHUB_OUTPUT"
           echo "✅ Found ISO: $ISO ($(du -h "$ISO" | cut -f1))"
 
-      # ── 3. Install tools ─────────────────────────────────────────────────────
       - name: Install tools
         run: |
           sudo apt-get update -qq
@@ -50,7 +58,6 @@ jobs:
             genisoimage xorriso wimtools cabextract p7zip-full \
             rsync dosfstools mtools curl
 
-      # ── 4. Mount & extract ISO ───────────────────────────────────────────────
       - name: Extract ISO
         run: |
           ISO="${{ steps.find_iso.outputs.iso }}"
@@ -61,23 +68,18 @@ jobs:
           sudo umount /mnt/iso_src
           echo "✅ Extracted: $(du -sh iso_work | cut -f1)"
 
-      # ── 5. Patch install.wim ─────────────────────────────────────────────────
       - name: Patch & slim install.wim
         run: bash scripts/patch_wim.sh
 
-      # ── 6. Patch boot.wim ────────────────────────────────────────────────────
       - name: Patch boot.wim
         run: bash scripts/patch_boot.sh
 
-      # ── 7. Cleanup ISO tree ──────────────────────────────────────────────────
       - name: Slim ISO tree (remove extras)
         run: bash scripts/slim_iso_tree.sh
 
-      # ── 8. Rebuild ISO ───────────────────────────────────────────────────────
       - name: Rebuild ISO
         run: bash scripts/rebuild_iso.sh
 
-      # ── 9. Stats ─────────────────────────────────────────────────────────────
       - name: Size comparison
         run: |
           ORIG="${{ steps.find_iso.outputs.iso }}"
@@ -89,11 +91,10 @@ jobs:
           echo "🪶 Patched  : ${NEW_MB} MB"
           echo "💾 Saved    : ${SAVED} MB"
 
-      # ── 10. Upload artifact ──────────────────────────────────────────────────
       - name: Upload patched ISO
         uses: actions/upload-artifact@v4
         with:
           name: Windows-Tiny7-Patched-Slim
           path: output/Windows.Tiny7.Patched.Slim.iso
           retention-days: 7
-          compression-level: 0   # ISO уже сжат — не тратить время
+          compression-level: 0
