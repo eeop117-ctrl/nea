@@ -1,0 +1,99 @@
+name: Patch & Slim Windows Tiny7 ISO
+
+on:
+  push:
+    paths:
+      - '*.iso'
+      - '*.ISO'
+  workflow_dispatch:
+    inputs:
+      iso_name:
+        description: 'ISO filename (e.g. Windows.Tiny7.Rev01.Unattended.Activated.CD.eXPerience.iso)'
+        required: false
+        default: ''
+
+jobs:
+  patch-iso:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      # ── 1. Checkout repo ─────────────────────────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          lfs: false
+
+      # ── 2. Find ISO ──────────────────────────────────────────────────────────
+      - name: Find ISO file
+        id: find_iso
+        run: |
+          if [ -n "${{ github.event.inputs.iso_name }}" ]; then
+            ISO="${{ github.event.inputs.iso_name }}"
+          else
+            ISO=$(find . -maxdepth 1 -iname "*.iso" | head -1 | sed 's|^\./||')
+          fi
+
+          if [ -z "$ISO" ]; then
+            echo "❌ No ISO found in repo root!"
+            exit 1
+          fi
+
+          echo "iso=$ISO" >> "$GITHUB_OUTPUT"
+          echo "✅ Found ISO: $ISO ($(du -h "$ISO" | cut -f1))"
+
+      # ── 3. Install tools ─────────────────────────────────────────────────────
+      - name: Install tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            genisoimage xorriso wimtools cabextract p7zip-full \
+            rsync dosfstools mtools curl
+
+      # ── 4. Mount & extract ISO ───────────────────────────────────────────────
+      - name: Extract ISO
+        run: |
+          ISO="${{ steps.find_iso.outputs.iso }}"
+          sudo mkdir -p /mnt/iso_src
+          sudo mount -o loop,ro "$ISO" /mnt/iso_src
+          mkdir -p iso_work
+          rsync -a --info=progress2 /mnt/iso_src/ iso_work/
+          sudo umount /mnt/iso_src
+          echo "✅ Extracted: $(du -sh iso_work | cut -f1)"
+
+      # ── 5. Patch install.wim ─────────────────────────────────────────────────
+      - name: Patch & slim install.wim
+        run: bash scripts/patch_wim.sh
+
+      # ── 6. Patch boot.wim ────────────────────────────────────────────────────
+      - name: Patch boot.wim
+        run: bash scripts/patch_boot.sh
+
+      # ── 7. Cleanup ISO tree ──────────────────────────────────────────────────
+      - name: Slim ISO tree (remove extras)
+        run: bash scripts/slim_iso_tree.sh
+
+      # ── 8. Rebuild ISO ───────────────────────────────────────────────────────
+      - name: Rebuild ISO
+        run: bash scripts/rebuild_iso.sh
+
+      # ── 9. Stats ─────────────────────────────────────────────────────────────
+      - name: Size comparison
+        run: |
+          ORIG="${{ steps.find_iso.outputs.iso }}"
+          NEW="output/Windows.Tiny7.Patched.Slim.iso"
+          ORIG_MB=$(du -m "$ORIG" | cut -f1)
+          NEW_MB=$(du -m "$NEW" | cut -f1)
+          SAVED=$((ORIG_MB - NEW_MB))
+          echo "📦 Original : ${ORIG_MB} MB"
+          echo "🪶 Patched  : ${NEW_MB} MB"
+          echo "💾 Saved    : ${SAVED} MB"
+
+      # ── 10. Upload artifact ──────────────────────────────────────────────────
+      - name: Upload patched ISO
+        uses: actions/upload-artifact@v4
+        with:
+          name: Windows-Tiny7-Patched-Slim
+          path: output/Windows.Tiny7.Patched.Slim.iso
+          retention-days: 7
+          compression-level: 0   # ISO уже сжат — не тратить время
